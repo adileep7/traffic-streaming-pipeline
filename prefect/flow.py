@@ -1,4 +1,12 @@
-# prefect/flow.py
+# ----------------------------------------
+# Traffic Pipeline Orchestration with Prefect
+# ----------------------------------------
+# This script defines a Prefect flow to orchestrate a real-time data pipeline.
+# It manages the coordinated execution of:
+#   - Traffic data producer (fetching from Azure Maps)
+#   - Spark streaming jobs (bronze, silver, gold layers)
+# It includes CLI overrides, subprocess management, and graceful shutdown.
+
 from __future__ import annotations
 
 import argparse
@@ -12,10 +20,12 @@ from typing import List, Optional
 import subprocess as sp
 from prefect import flow, task, get_run_logger
 
+# ----------------------------------------
+# CLI Argument Parsing
+# ----------------------------------------
+# Prefect ignores unknown CLI args, so we parse early to customize flow execution.
+# Users can toggle stages on/off or provide custom paths.
 
-# ----------------------------
-# CLI flags (prefect ignores unknown, so we parse early)
-# ----------------------------
 parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument("-run_producer", type=str, default="true")
 parser.add_argument("-run_bronze", type=str, default="true")
@@ -30,20 +40,25 @@ parser.add_argument(
 )
 args, _ = parser.parse_known_args()
 
+# Convert CLI flags to booleans
 RUN_PRODUCER = args.run_producer.lower() == "true"
 RUN_BRONZE = args.run_bronze.lower() == "true"
 RUN_SILVER = args.run_silver.lower() == "true"
 RUN_GOLD_10M = args.run_gold_10m.lower() == "true"
 KEEP_RUNNING_SECONDS = int(args.keep_running_seconds)
 
-# repo and common paths
+# ----------------------------------------
+# Path Resolution
+# ----------------------------------------
+# Resolve script and directory paths relative to repo structure
+
 REPO = Path(__file__).resolve().parent.parent
 KAFKA_DIR = REPO / "kafka"
 SPARK_DIR = REPO / "spark"
 DATA_DIR = REPO / "data"
 CHECKPOINTS_DIR = REPO / "checkpoints"
 
-# default candidate locations for the producer script
+# Default locations to search for the producer script if not provided explicitly
 DEFAULT_PRODUCER_CANDIDATES = [
     KAFKA_DIR / "producer.py",
     KAFKA_DIR / "traffic_producer.py",
@@ -51,20 +66,24 @@ DEFAULT_PRODUCER_CANDIDATES = [
     REPO / "scripts" / "producer.py",
 ]
 
-# resolve producer path
+# Resolve producer script location
 if args.producer_path:
-    PRODUCER_SCRIPT = (REPO / args.producer_path).resolve() if not os.path.isabs(args.producer_path) else Path(args.producer_path).resolve()
+    PRODUCER_SCRIPT = (
+        (REPO / args.producer_path).resolve()
+        if not os.path.isabs(args.producer_path)
+        else Path(args.producer_path).resolve()
+    )
 else:
     PRODUCER_SCRIPT = next((p for p in DEFAULT_PRODUCER_CANDIDATES if p.exists()), None)
 
-
-# ----------------------------
+# ----------------------------------------
 # Utilities
-# ----------------------------
+# ----------------------------------------
+
 def _find_spark_submit() -> str:
     """
-    Returns a spark-submit executable path.
-    Prefers the one in PATH; falls back to $SPARK_HOME/bin/spark-submit.
+    Locate the `spark-submit` executable, preferring PATH, falling back to SPARK_HOME.
+    Ensures the flow works on any environment with Spark installed.
     """
     from shutil import which
 
@@ -74,18 +93,17 @@ def _find_spark_submit() -> str:
 
     spark_home = os.environ.get("SPARK_HOME")
     if spark_home:
-        cand2 = Path(spark_home) / "bin" / "spark-submit"
-        if cand2.exists():
-            return str(cand2)
+        fallback = Path(spark_home) / "bin" / "spark-submit"
+        if fallback.exists():
+            return str(fallback)
 
-    # final fallback: rely on PATH and let it error naturally
-    return "spark-submit"
+    return "spark-submit"  # Final fallback (may fail if misconfigured)
 
 
 def _spark_command(script_rel_path: str, extra_args: Optional[List[str]] = None) -> List[str]:
     """
-    Build a spark-submit command with Delta + Kafka packages and Delta session configs.
-    script_rel_path is relative to repo root (e.g., 'spark/stream_bronze.py').
+    Construct a full `spark-submit` command with required Delta + Kafka packages.
+    Configures Spark session with Delta-specific extensions.
     """
     cmd = [
         _find_spark_submit(),
@@ -95,8 +113,6 @@ def _spark_command(script_rel_path: str, extra_args: Optional[List[str]] = None)
         "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension",
         "--conf",
         "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog",
-        # (Optional but often handy) quiet a bit of noise:
-        # "--conf", "spark.sql.adaptive.enabled=false",
         str(REPO / script_rel_path),
     ]
     if extra_args:
@@ -106,8 +122,8 @@ def _spark_command(script_rel_path: str, extra_args: Optional[List[str]] = None)
 
 def _start_process(cmd: List[str], cwd: Optional[Path] = None, env: Optional[dict] = None) -> sp.Popen:
     """
-    Starts a subprocess and returns the Popen handle.
-    We pipe stdout/stderr to parent so logs show in Prefect.
+    Launch a subprocess (producer or Spark job).
+    Logs are piped directly to stdout/stderr for visibility in Prefect UI.
     """
     return sp.Popen(
         cmd,
@@ -115,13 +131,14 @@ def _start_process(cmd: List[str], cwd: Optional[Path] = None, env: Optional[dic
         env=env or os.environ.copy(),
         stdout=sys.stdout,
         stderr=sys.stderr,
-        text=False,  # allow raw pass-through
+        text=False,  # Preserve raw output (important for logs)
     )
 
 
 def _check_started_or_fail(proc: sp.Popen, name: str, grace_seconds: float = 2.0):
     """
-    Give the child a moment to fail fast; if it exits immediately, raise a helpful error.
+    Wait briefly after starting a process to catch immediate failures.
+    Useful for catching misconfigurations early (e.g., bad Spark script).
     """
     time.sleep(grace_seconds)
     if proc.poll() is not None:
@@ -130,11 +147,10 @@ def _check_started_or_fail(proc: sp.Popen, name: str, grace_seconds: float = 2.0
 
 def _terminate_process(proc: Optional[sp.Popen], name: str, logger, sig=signal.SIGINT, wait_seconds: float = 6.0):
     """
-    Try to stop a subprocess gracefully, then escalate if needed.
+    Attempt graceful termination of a subprocess, escalating if needed.
+    This avoids orphaned processes and ensures a clean shutdown.
     """
-    if not proc:
-        return
-    if proc.poll() is not None:
+    if not proc or proc.poll() is not None:
         return
 
     try:
@@ -155,23 +171,22 @@ def _terminate_process(proc: Optional[sp.Popen], name: str, logger, sig=signal.S
     except Exception as e:
         logger.warning(f"Error while stopping {name}: {e}")
 
+# ----------------------------------------
+# Prefect Tasks (each step is isolated and retryable)
+# ----------------------------------------
 
-# ----------------------------
-# Prefect tasks
-# ----------------------------
 @task
 def start_producer() -> sp.Popen:
+    """Start the traffic incident data producer as a subprocess."""
     logger = get_run_logger()
 
     if not RUN_PRODUCER:
-        logger.info("Producer disabled by flag.")
-        return None  # type: ignore
+        logger.info("Producer disabled by CLI flag.")
+        return None
 
     if PRODUCER_SCRIPT is None or not PRODUCER_SCRIPT.exists():
         raise FileNotFoundError(
-            "Producer script not found. Pass `-producer_path=/full/path/to/producer.py` "
-            "or place it at one of: "
-            + ", ".join(map(str, DEFAULT_PRODUCER_CANDIDATES))
+            "Producer script not found. Provide -producer_path or place it in a known location."
         )
 
     cmd = [sys.executable, str(PRODUCER_SCRIPT)]
@@ -183,11 +198,12 @@ def start_producer() -> sp.Popen:
 
 @task
 def start_bronze() -> sp.Popen:
+    """Start the Bronze (raw ingestion) Spark streaming job."""
     logger = get_run_logger()
 
     if not RUN_BRONZE:
-        logger.info("Bronze disabled by flag.")
-        return None  # type: ignore
+        logger.info("Bronze stream disabled by CLI flag.")
+        return None
 
     script = "spark/stream_bronze.py"
     cmd = _spark_command(script)
@@ -199,11 +215,12 @@ def start_bronze() -> sp.Popen:
 
 @task
 def start_silver() -> sp.Popen:
+    """Start the Silver (cleaned data) Spark streaming job."""
     logger = get_run_logger()
 
     if not RUN_SILVER:
-        logger.info("Silver disabled by flag.")
-        return None  # type: ignore
+        logger.info("Silver stream disabled by CLI flag.")
+        return None
 
     script = "spark/stream_silver.py"
     cmd = _spark_command(script)
@@ -215,11 +232,12 @@ def start_silver() -> sp.Popen:
 
 @task
 def start_gold_10m() -> sp.Popen:
+    """Start the Gold (aggregated data) Spark streaming job."""
     logger = get_run_logger()
 
     if not RUN_GOLD_10M:
-        logger.info("Gold (10m) disabled by flag.")
-        return None  # type: ignore
+        logger.info("Gold 10m stream disabled by CLI flag.")
+        return None
 
     script = "spark/stream_gold_10m.py"
     cmd = _spark_command(script)
@@ -231,70 +249,62 @@ def start_gold_10m() -> sp.Popen:
 
 @task
 def stop_all_processes(procs: List[Optional[sp.Popen]]):
+    """Stop all subprocesses cleanly when the flow ends."""
     logger = get_run_logger()
     names = ["Producer", "Bronze", "Silver", "Gold10m"]
-    for name, p in zip(names, procs):
-        _terminate_process(p, name, logger)
+    for name, proc in zip(names, procs):
+        _terminate_process(proc, name, logger)
 
+# ----------------------------------------
+# Prefect Flow
+# ----------------------------------------
 
-# ----------------------------
-# The Flow
-# ----------------------------
 @flow(name="Traffic Pipeline Orchestrator")
 def run_pipeline():
+    """
+    Main orchestration logic.
+    Starts selected pipeline components in order and monitors them.
+    Ensures a graceful shutdown and failure detection.
+    """
     logger = get_run_logger()
     logger.info(f"Repo root: {REPO}")
     logger.info(f"Data dir:  {DATA_DIR}")
     logger.info(f"Checkpoints dir: {CHECKPOINTS_DIR}")
 
     procs: List[Optional[sp.Popen]] = []
+
     try:
-        # Launch in order: producer -> bronze -> silver -> gold
-        if RUN_PRODUCER:
-            procs.append(start_producer.submit().result())
-        else:
-            procs.append(None)
-
-        # tiny gaps help with local startup races
+        # Launch components in order with small delays to avoid startup race conditions
+        procs.append(start_producer.submit().result() if RUN_PRODUCER else None)
         time.sleep(1.0)
 
-        if RUN_BRONZE:
-            procs.append(start_bronze.submit().result())
-        else:
-            procs.append(None)
-
+        procs.append(start_bronze.submit().result() if RUN_BRONZE else None)
         time.sleep(1.0)
 
-        if RUN_SILVER:
-            procs.append(start_silver.submit().result())
-        else:
-            procs.append(None)
-
+        procs.append(start_silver.submit().result() if RUN_SILVER else None)
         time.sleep(1.0)
 
-        if RUN_GOLD_10M:
-            procs.append(start_gold_10m.submit().result())
-        else:
-            procs.append(None)
+        procs.append(start_gold_10m.submit().result() if RUN_GOLD_10M else None)
 
-        # hold the flow open if requested (0 means return immediately)
+        # Keep flow alive for interactive/debugging if specified
         if KEEP_RUNNING_SECONDS > 0:
             logger.info(f"Keeping flow alive for {KEEP_RUNNING_SECONDS} seconds...")
             end = time.time() + KEEP_RUNNING_SECONDS
             while time.time() < end:
-                # If any critical proc has died, fail early
-                for name, p in zip(["Producer", "Bronze", "Silver", "Gold10m"], procs):
-                    if p is not None and p.poll() is not None:
-                        raise RuntimeError(f"{name} process exited; see logs above.")
+                # Watch for unexpected process deaths
+                for name, proc in zip(["Producer", "Bronze", "Silver", "Gold10m"], procs):
+                    if proc and proc.poll() is not None:
+                        raise RuntimeError(f"{name} process exited early; see logs.")
                 time.sleep(1.0)
         else:
-            logger.info("Flow started all processes; exiting without holding the run open.")
+            logger.info("Flow launched all processes; exiting immediately (no hold).")
 
     finally:
-        # ensure we always try to stop children
-        logger.info("All processes stopping...")
+        # Always attempt to shut down processes
+        logger.info("Initiating cleanup of all subprocesses...")
         stop_all_processes.submit(procs).result()
 
 
+# CLI entrypoint
 if __name__ == "__main__":
     run_pipeline()
