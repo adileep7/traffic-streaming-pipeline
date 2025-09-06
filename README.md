@@ -40,7 +40,7 @@ This pipeline is a simplified, but realistic, version of what such organizations
    ```bash
    cp .env.example .env
    # edit .env and add your Azure Maps API key
-
+   ```
 2) Create & activate virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
