@@ -1,4 +1,3 @@
-# spark/spark_job.py
 import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, to_timestamp
