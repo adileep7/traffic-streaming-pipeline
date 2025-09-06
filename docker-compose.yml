@@ -11,10 +11,11 @@ services:
       --reserve-memory 0M
       --node-id 0
       --check=false
-      --kafka-addr PLAINTEXT://0.0.0.0:9092
-      --advertise-kafka-addr PLAINTEXT://redpanda:9092
+      --kafka-addr PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:9093
+      --advertise-kafka-addr PLAINTEXT://redpanda:9092,OUTSIDE://localhost:9093
     ports:
-      - "9092:9092"
+      - "9092:9092"   # internal (containers use redpanda:9092)
+      - "9093:9093"   # external (host uses localhost:9093)
       - "9644:9644"
 
   console:
