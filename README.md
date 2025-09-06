@@ -12,7 +12,7 @@ To launch the entire pipeline (requires Docker + Python 3.12):
 
 ```bash
 ./run_pipeline.sh
-
+```
 ---
 ## 🧠 What This Project Does
 This project builds a **real-time streaming data pipeline** that ingests live traffic incident data from the **Azure Maps Traffic API** and processes it end-to-end. 
