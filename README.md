@@ -55,7 +55,7 @@ data/silver/incidents
 data/gold/agg_incidents_10m
 ---
 ## 🏗️ Architecture Design
-![Architecture Diagram](images/architecture_screenshot.png)
+![Architecture Diagram](images/traffic_streaming_architecture.png)
 
 ---
 ## 🛠️ Tools & Rationale
