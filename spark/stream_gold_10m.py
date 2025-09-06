@@ -1,52 +1,64 @@
-import os
-from dotenv import load_dotenv
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import window, col, count, avg
-from delta import configure_spark_with_delta_pip
+from pyspark.sql.functions import col, window, count, avg
 
-load_dotenv()
+SILVER_PATH = "./data/silver/incidents"
+GOLD_PATH = "./data/gold"
+CHECKPOINT = "./checkpoints/gold_incidents_10m"
 
-SILVER_PATH = os.getenv("SILVER_PATH","./data/silver")
-GOLD_PATH   = os.getenv("GOLD_PATH","./data/gold")
-CHECKPOINT  = os.getenv("GOLD_CHECKPOINT","./checkpoints/gold_incidents_10m")
+def main():
+    spark = (
+        SparkSession.builder
+        .appName("TrafficIncidentsGold10m")
+        # Delta configs (safe to include even if you also set them via spark-submit)
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        # Optional: speedups for streaming state ops
+        .config("spark.sql.shuffle.partitions", "4")
+        .getOrCreate()
+    )
 
-builder = (
-    SparkSession.builder
-      .appName("TrafficIncidentsGold10m")
-      .config("spark.sql.extensions","io.delta.sql.DeltaSparkSessionExtension")
-      .config("spark.sql.catalog.spark_catalog","org.apache.spark.sql.delta.catalog.DeltaCatalog")
-      .config("spark.sql.shuffle.partitions","1")
-)
-spark = configure_spark_with_delta_pip(builder).getOrCreate()
+    # Read the silver Delta table as a stream and add a watermark so we can use append mode
+    silver = (
+        spark.readStream
+             .format("delta")
+             .load(SILVER_PATH)
+             .withWatermark("event_ts", "30 minutes")   # ← key fix
+    )
 
-silver = spark.readStream.format("delta").load(f"{SILVER_PATH}/incidents")
+    # 10-minute tumbling window aggregates
+    agg = (
+        silver
+        .where(col("event_ts").isNotNull())
+        .groupBy(
+            window(col("event_ts"), "10 minutes").alias("w"),
+            col("typeCode").alias("type_code"),
+            col("road")
+        )
+        .agg(
+            count("*").alias("event_count"),
+            avg("delay_seconds").alias("avg_delay_seconds")
+        )
+        .select(
+            col("w.start").alias("window_start"),
+            col("w.end").alias("window_end"),
+            "type_code",
+            "road",
+            "event_count",
+            "avg_delay_seconds"
+        )
+    )
 
-agg = (
-    silver
-      .where(col("event_ts").isNotNull())
-      .groupBy(
-          window(col("event_ts"), "10 minutes").alias("w"),
-          col("typeCode").alias("type_code"),
-          col("road")
-      )
-      .agg(
-          count("*").alias("event_count"),
-          avg("delay_seconds").alias("avg_delay_seconds")
-      )
-      .select(
-          col("w.start").alias("window_start"),
-          col("w.end").alias("window_end"),
-          "type_code",
-          "road",
-          "event_count",
-          "avg_delay_seconds"
-      )
-)
+    # Write the gold Delta table as a stream in append mode
+    query = (
+        agg.writeStream
+           .format("delta")
+           .outputMode("append")                         # works because we added a watermark
+           .option("checkpointLocation", CHECKPOINT)
+           .trigger(processingTime="10 seconds")         # adjust as you like
+           .start(f"{GOLD_PATH}/agg_incidents_10m")
+    )
 
-(agg.writeStream
-   .format("delta")
-   .option("checkpointLocation", CHECKPOINT)
-   .outputMode("append")
-   .trigger(processingTime="10 seconds")
-   .start(f"{GOLD_PATH}/agg_incidents_10m")
-   .awaitTermination())
+    query.awaitTermination()
+
+if __name__ == "__main__":
+    main()
