@@ -1,34 +1,34 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, window, count, avg
 
+# File system locations for input, output, and streaming checkpointing
 SILVER_PATH = "./data/silver/incidents"
 GOLD_PATH = "./data/gold"
 CHECKPOINT = "./checkpoints/gold_incidents_10m"
 
 def main():
+    # Initialize SparkSession with Delta Lake support and tuning options
     spark = (
         SparkSession.builder
-        .appName("TrafficIncidentsGold10m")
-        # Delta configs (safe to include even if you also set them via spark-submit)
+        .appName("TrafficIncidentsGold10m")  # Job name in Spark UI
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        # Optional: speedups for streaming state ops
-        .config("spark.sql.shuffle.partitions", "4")
+        .config("spark.sql.shuffle.partitions", "4")  # Optimize shuffles for grouping/window ops
         .getOrCreate()
     )
 
-    # Read the silver Delta table as a stream and add a watermark so we can use append mode
+    # Read the Silver-level Delta table as a streaming source
     silver = (
         spark.readStream
              .format("delta")
              .load(SILVER_PATH)
-             .withWatermark("event_ts", "30 minutes")   # ← key fix
+             .withWatermark("event_ts", "30 minutes")  # Required for windowed aggregation in append mode
     )
 
-    # 10-minute tumbling window aggregates
+    # Perform 10-minute tumbling window aggregations by road and incident type
     agg = (
         silver
-        .where(col("event_ts").isNotNull())
+        .where(col("event_ts").isNotNull())  # Filter out records missing timestamps
         .groupBy(
             window(col("event_ts"), "10 minutes").alias("w"),
             col("typeCode").alias("type_code"),
@@ -48,13 +48,13 @@ def main():
         )
     )
 
-    # Write the gold Delta table as a stream in append mode
+    # Write aggregated results to a Delta Gold table as a streaming sink
     query = (
         agg.writeStream
            .format("delta")
-           .outputMode("append")                         # works because we added a watermark
-           .option("checkpointLocation", CHECKPOINT)
-           .trigger(processingTime="10 seconds")         # adjust as you like
+           .outputMode("append")  # Works with watermark + tumbling window
+           .option("checkpointLocation", CHECKPOINT)  # Ensures exactly-once fault-tolerant writes
+           .trigger(processingTime="10 seconds")      # Controls how often output is written
            .start(f"{GOLD_PATH}/agg_incidents_10m")
     )
 
