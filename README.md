@@ -21,9 +21,9 @@ This project builds a **real-time streaming data pipeline** that ingests live tr
 - **Spark Structured Streaming with Delta Lake** ingests those events into the **Bronze layer** (raw).  
 - The pipeline then cleans and enriches data in the **Silver layer** (standardized, partitioned).  
 - Finally, it computes 10-minute aggregations in the **Gold layer**, ready for dashboards or analytics.  
-- **Prefect orchestration** automates and coordinates the producer + Spark streaming jobs.  
-
+- **Prefect orchestration** automates and coordinates the producer + Spark streaming jobs.
 The result is a running system that demonstrates how real-time data can be collected, transformed, and aggregated for decision-making.
+
 ---
 ## 💼 Business Use Case
 Imagine a **city transportation authority** or a **logistics company** that needs to monitor live road conditions:
@@ -32,8 +32,8 @@ Imagine a **city transportation authority** or a **logistics company** that need
 - Aggregate incidents into time windows to spot congestion trends
 - Feed insights into **dashboards, alerting systems, or navigation apps**
 - Support **route optimization** for delivery fleets or emergency response units
-
 This pipeline is a simplified, but realistic, version of what such organizations would deploy to handle **real-time traffic intelligence at scale**.
+
 ---
 ## 📦 How to Run
 1) Clone repo & create `.env`
@@ -55,7 +55,7 @@ data/silver/incidents
 data/gold/agg_incidents_10m
 ---
 ## 🏗️ Architecture Design
-![Architecture Diagram](images/...png)
+![Architecture Diagram](images/architecture_screenshot.png)
 
 ---
 ## 🛠️ Tools & Rationale
@@ -72,6 +72,3 @@ data/gold/agg_incidents_10m
 - **Kafka connection refused** → solved by aligning ports (9093) in both `docker-compose.yml` and app config
 - **Spark structured streaming cleanup warnings** → mitigated by using Delta format with checkpointing
 - **Prefect task serialization errors** → ignored harmless cache warnings; could disable cache for `stop_all_processes`
-
-- **Challenge:** Some series had missing values.  
-  **Solution:** Implemented null checks and default handling before loading.
