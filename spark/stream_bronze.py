@@ -1,9 +1,11 @@
 import os
+from dotenv import load_dotenv
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, to_timestamp
 from pyspark.sql.types import *
-
 from delta import configure_spark_with_delta_pip
+
+load_dotenv()  # <-- load .env so KAFKA_BOOTSTRAP/paths apply
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9093")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "traffic_incidents")
@@ -49,19 +51,13 @@ parsed = (
     raw.selectExpr("CAST(value AS STRING) AS json")
        .select(from_json(col("json"), schema).alias("e"))
        .select("e.*")
-       # event timestamp if present in _raw.st (string ISO-8601); otherwise null
        .withColumn("event_ts", to_timestamp(col("_raw")["st"], "yyyy-MM-dd'T'HH:mm:ssX"))
 )
 
-# partition by event date if available; otherwise no partition
-output_path = os.path.join(BRONZE_PATH, "incidents")
-
-query = (
-    parsed.writeStream
+(output := parsed.writeStream
     .format("delta")
     .option("checkpointLocation", CHECKPOINT)
     .outputMode("append")
-    .start(output_path)
-)
-
-query.awaitTermination()
+    .trigger(processingTime="10 seconds")  # force frequent commits
+    .start(os.path.join(BRONZE_PATH, "incidents"))
+).awaitTermination()
