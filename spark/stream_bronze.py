@@ -30,9 +30,11 @@ schema = StructType([
 
 builder = (
     SparkSession.builder
-    .appName("TrafficIncidentsBronze")
-    .config("spark.sql.streaming.schemaInference", "true")
-    .config("spark.sql.shuffle.partitions", "1")
+      .appName("TrafficIncidentsBronze")
+      .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+      .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+      .config("spark.sql.streaming.schemaInference", "true")
+      .config("spark.sql.shuffle.partitions", "1")
 )
 
 spark = configure_spark_with_delta_pip(builder).getOrCreate()
